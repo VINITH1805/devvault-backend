@@ -1,0 +1,9 @@
+# Ignore local development configurations
+appsettings.Development.json
+
+# Ignore Visual Studio hidden caching and indexing folders
+.vs/
+*.vsidx
+
+# Ignore all compiled binary libraries
+*.dll

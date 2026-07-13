@@ -1,0 +1,31 @@
+@DevVault_HostAddress = http://localhost:5282
+
+GET {{DevVault_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
+
+### 1. TEST THE AI BRAIN (Generate Notes from Messy Commits)
+POST {{DevVault_HostAddress}}/api/generate
+Content-Type: application/json
+
+{
+  "rawGitDiff": "fixed login bug. also updated the database schema for users to include phone numbers. refactored the old auth controller because it was a mess. updated css on the header."
+}
+
+### 2. TEST SAVING TO THE POSTGRES VAULT
+# (We use a dummy User GUID here since we haven't built GitHub Auth yet)
+POST {{DevVault_HostAddress}}/api/vault
+Content-Type: application/json
+
+{
+  "userId": "11111111-2222-3333-4444-555555555555",
+  "title": "Auth Refactor & User Schema Update",
+  "rawInput": "fixed login bug. also updated the database schema...",
+  "markdownNotes": " Minor Release\n- Fixed login bug\n- Added phone numbers to schema",
+  "socialPost": "Just shipped a massive update to our auth system today!  #buildinpublic",
+  "semanticVersion": "Minor"
+}
+
+### 3. TEST FETCHING A DEVELOPER'S HISTORY
+GET {{DevVault_HostAddress}}/api/vault/user/11111111-2222-3333-4444-555555555555
