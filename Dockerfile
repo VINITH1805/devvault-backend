@@ -3,12 +3,12 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy the project file and restore dependencies
-COPY ["DevVault.csproj", "./"]
-RUN dotnet restore "./DevVault.csproj"
+COPY ["DevVault/DevVault.csproj", "DevVault/"]
+RUN dotnet restore "DevVault/DevVault.csproj"
 
 # Copy the rest of the code and build
 COPY . .
-RUN dotnet publish "DevVault.csproj" -c Release -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "DevVault/DevVault.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
 # Stage 2: Run the application
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
