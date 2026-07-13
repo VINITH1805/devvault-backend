@@ -5,6 +5,7 @@ using DevVault.Services;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
@@ -91,6 +92,11 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedProto
+});
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -192,12 +198,16 @@ app.MapGet("/api/auth/login", () =>
 });
 
 // 2. The Callback (Where GitHub sends the user back after they approve your app)
-app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) => 
+// 2. The Callback (Where GitHub sends the user back after they approve your app)
+app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
 {
+    // Grab the dynamic frontend URL from the environment (Netlify in production, Localhost in dev)
+    var frontendUrl = builder.Configuration["Cors:FrontendUrl"]?.TrimEnd('/');
+
     var result = await context.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-    
-    if (!result.Succeeded) 
-        return Results.Redirect("http://localhost:4200/?error=login_failed");
+
+    if (!result.Succeeded)
+        return Results.Redirect($"{frontendUrl}/?error=login_failed");
 
     // 1. Extract GitHub Data
     var githubId = result.Principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -205,15 +215,14 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
     var email = result.Principal.FindFirst(ClaimTypes.Email)?.Value ?? "";
 
     if (string.IsNullOrEmpty(githubId))
-        return Results.Redirect("http://localhost:4200/?error=missing_github_id");
+        return Results.Redirect($"{frontendUrl}/?error=missing_github_id");
 
     // 2. Database Sync: Does this user exist?
-    var user = db.Users.FirstOrDefault(u => u.Username == username); // Adjust property name to match your DB
-    
+    var user = db.Users.FirstOrDefault(u => u.Username == username);
+
     if (user == null)
     {
-        // First time login! Create a real database entry.
-        user = new User // Make sure this matches your C# User model
+        user = new User
         {
             Id = Guid.NewGuid(),
             Username = username,
@@ -230,7 +239,6 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
 
     var claims = new[]
     {
-        // Store their REAL database ID inside the token
         new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
         new Claim("username", user.Username)
     };
@@ -239,7 +247,7 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
         issuer: builder.Configuration["Jwt:Issuer"],
         audience: builder.Configuration["Jwt:Audience"],
         claims: claims,
-        expires: DateTime.Now.AddDays(7), // Token lasts for 7 days
+        expires: DateTime.Now.AddDays(7),
         signingCredentials: credentials);
 
     var jwtString = new JwtSecurityTokenHandler().WriteToken(token);
@@ -247,8 +255,8 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
     // Clean up the temporary cookie
     await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
 
-    // 4. Send them back to Angular WITH the token in the URL query string
-    return Results.Redirect($"http://localhost:4200/dashboard?token={jwtString}");
+    // 4. Send them back to Angular using the dynamic URL!
+    return Results.Redirect($"{frontendUrl}/dashboard?token={jwtString}");
 });
 
 app.UseAuthentication(); 
