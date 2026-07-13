@@ -7,3 +7,7 @@ appsettings.Development.json
 
 # Ignore all compiled binary libraries
 *.dll
+
+
+[Bb]in/
+[Oo]bj/
