@@ -14,25 +14,33 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// ==========================================
+// 1. SERVICE REGISTRATION (The Container)
+// ==========================================
 
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+// OpenAPI / Swagger
 builder.Services.AddOpenApi();
 
+// Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connectionString));
 
+// External Services
 builder.Services.AddHttpClient<IGeminiService, GeminiService>();
 
-// Add CORS Policy
-var frontendUrl = builder.Configuration["Cors:FrontendUrl"];
+// Health Checks (For Render to monitor uptime)
+builder.Services.AddHealthChecks();
 
+// Global Exception Handling (Standardizes errors as JSON instead of HTML crashes)
+builder.Services.AddProblemDetails();
+
+// CORS Policy
+var frontendUrl = builder.Configuration["Cors:FrontendUrl"];
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AngularDev", policy =>
     {
-        // Safety check: Ensure the URL isn't null before adding it
         if (!string.IsNullOrEmpty(frontendUrl))
         {
             policy.WithOrigins(frontendUrl)
@@ -42,10 +50,9 @@ builder.Services.AddCors(options =>
     });
 });
 
-// --- AUTHENTICATION PIPELINE ---
+// Authentication & OAuth
 builder.Services.AddAuthentication(options =>
 {
-    // We use a temporary cookie to hold the state while GitHub redirects back
     options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
     options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
     options.DefaultSignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
@@ -53,14 +60,11 @@ builder.Services.AddAuthentication(options =>
 .AddCookie(options =>
 {
     options.LoginPath = "/api/auth/login";
-
-    // ADD THIS EVENT HANDLER:
-    // This stops the backend from redirecting API calls to GitHub!
     options.Events.OnRedirectToLogin = context =>
     {
         if (context.Request.Path.StartsWithSegments("/api"))
         {
-            context.Response.StatusCode = 401; // Just return Unauthorized
+            context.Response.StatusCode = 401;
             return Task.CompletedTask;
         }
         context.Response.Redirect(context.RedirectUri);
@@ -72,8 +76,6 @@ builder.Services.AddAuthentication(options =>
     options.ClientId = builder.Configuration["GitHub:ClientId"]!;
     options.ClientSecret = builder.Configuration["GitHub:ClientSecret"]!;
     options.CallbackPath = "/signin-github";
-
-    // We want their email so we can save it in our database!
     options.Scope.Add("user:email");
 })
 .AddJwtBearer(options =>
@@ -89,55 +91,71 @@ builder.Services.AddAuthentication(options =>
         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
     };
 });
+
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
+// ==========================================
+// 2. MIDDLEWARE PIPELINE (Order is Critical!)
+// ==========================================
+
+// A. Cloud Proxy Headers (Must be first for Render HTTPS detection)
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedProto
 });
 
-// Configure the HTTP request pipeline.
+// B. Global Exception Handler (Catches all crashes and formats them nicely)
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-app.UseCors("AngularDev");
-
+// C. Security & Routing
+app.UseCors("AngularDev"); // CORS must happen before Auth and Routing
 app.UseHttpsRedirection();
-
-app.MapGet("/", () => "DevVault API Engine is Running! ");
-
+app.UseAuthentication();
+app.UseAuthorization();
 
 // ==========================================
-// THE AI ORCHESTRATION ENDPOINT
+// 3. ENDPOINTS
 // ==========================================
+
+app.MapGet("/", () => "DevVault API Engine is Running!");
+
+// Health Check Endpoint
+app.MapHealthChecks("/api/health");
+
+// --- AI Orchestration ---
 app.MapPost("/api/generate", async (GenerateReleaseRequest request, IGeminiService ai) =>
 {
+    // Basic validation to prevent null reference exceptions
+    if (string.IsNullOrWhiteSpace(request.RawGitDiff))
+    {
+        return Results.BadRequest("Git diff cannot be empty.");
+    }
+
     var result = await ai.AnalyzeGitDiffAsync(request.RawGitDiff);
 
     return result is not null
         ? Results.Ok(result)
-        : Results.BadRequest("AI generation failed or returned empty.");
+        : Results.Problem("AI generation failed to return a valid response.", statusCode: 500);
 })
 .WithName("GenerateReleaseNotes");
 
-// ==========================================
-// THE CAREER VAULT ENDPOINTS
-// ==========================================
 
-// 1. SAVE to Vault
+// --- Career Vault ---
 app.MapPost("/api/vault", async (SaveReleaseRequest request, AppDbContext db, ClaimsPrincipal userToken) =>
 {
-    // Extract the real Database ID from the JWT
     var realUserIdStr = userToken.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
     if (!Guid.TryParse(realUserIdStr, out var realUserId))
         return Results.Unauthorized();
 
-    // Now save to the DB using their REAL ID instead of request.UserId
     var release = new SavedRelease
     {
         Id = Guid.NewGuid(),
@@ -154,19 +172,15 @@ app.MapPost("/api/vault", async (SaveReleaseRequest request, AppDbContext db, Cl
     await db.SaveChangesAsync();
     return Results.Created($"/api/vault/{release.Id}", release);
 })
-.RequireAuthorization(); // <--- This endpoint now demands a VIP Pass!
+.RequireAuthorization();
 
-
-// 2. FETCH Vault History (For a specific developer)
 app.MapGet("/api/vault/history", async (AppDbContext db, ClaimsPrincipal userToken) =>
 {
-    // 1. Extract the user's real ID from their JWT Token
     var realUserIdStr = userToken.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
     if (!Guid.TryParse(realUserIdStr, out var realUserId))
         return Results.Unauthorized();
 
-    // 2. Fetch only their records, sorting by newest first!
     var history = await db.SavedReleases
         .Where(r => r.UserId == realUserId)
         .OrderByDescending(r => r.CreatedAt)
@@ -174,10 +188,8 @@ app.MapGet("/api/vault/history", async (AppDbContext db, ClaimsPrincipal userTok
 
     return Results.Ok(history);
 })
-.RequireAuthorization(); // Requires the JWT VIP Pass!
+.RequireAuthorization();
 
-
-// 3. FETCH Specific Release Detail (When they click a row in the UI)
 app.MapGet("/api/vault/{id:guid}", async (Guid id, AppDbContext db) =>
 {
     var release = await db.SavedReleases.FindAsync(id);
@@ -188,7 +200,8 @@ app.MapGet("/api/vault/{id:guid}", async (Guid id, AppDbContext db) =>
 })
 .WithName("GetReleaseDetail");
 
-// 1. Trigger the GitHub Login Screen
+
+// --- Authentication ---
 app.MapGet("/api/auth/login", () =>
 {
     return Results.Challenge(
@@ -197,11 +210,8 @@ app.MapGet("/api/auth/login", () =>
     );
 });
 
-// 2. The Callback (Where GitHub sends the user back after they approve your app)
-// 2. The Callback (Where GitHub sends the user back after they approve your app)
 app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
 {
-    // Grab the dynamic frontend URL from the environment (Netlify in production, Localhost in dev)
     var frontendUrl = builder.Configuration["Cors:FrontendUrl"]?.TrimEnd('/');
 
     var result = await context.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
@@ -209,7 +219,6 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
     if (!result.Succeeded)
         return Results.Redirect($"{frontendUrl}/?error=login_failed");
 
-    // 1. Extract GitHub Data
     var githubId = result.Principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
     var username = result.Principal.FindFirst(ClaimTypes.Name)?.Value ?? "Unknown";
     var email = result.Principal.FindFirst(ClaimTypes.Email)?.Value ?? "";
@@ -217,7 +226,6 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
     if (string.IsNullOrEmpty(githubId))
         return Results.Redirect($"{frontendUrl}/?error=missing_github_id");
 
-    // 2. Database Sync: Does this user exist?
     var user = db.Users.FirstOrDefault(u => u.Username == username);
 
     if (user == null)
@@ -233,7 +241,6 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
         await db.SaveChangesAsync();
     }
 
-    // 3. Mint the JWT VIP Pass
     var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!));
     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
@@ -252,15 +259,9 @@ app.MapGet("/api/auth/callback", async (HttpContext context, AppDbContext db) =>
 
     var jwtString = new JwtSecurityTokenHandler().WriteToken(token);
 
-    // Clean up the temporary cookie
     await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
 
-    // 4. Send them back to Angular using the dynamic URL!
     return Results.Redirect($"{frontendUrl}/dashboard?token={jwtString}");
 });
-
-app.UseAuthentication(); 
-
-app.UseAuthorization();
 
 app.Run();
